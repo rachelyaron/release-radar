@@ -1,3 +1,8 @@
+// SETUP — run in Supabase SQL Editor:
+// ALTER TABLE tasks ADD COLUMN IF NOT EXISTS notes text;
+// Create Storage bucket 'assets' (public: true), then run:
+// create policy "allow all" on storage.objects for all using (bucket_id = 'assets') with check (bucket_id = 'assets');
+
 'use client'
 
 import { use, useEffect, useRef, useState } from 'react'
@@ -516,7 +521,7 @@ function AssetsTab({ tasks, releaseId, trackId, t, onToggle, onSaveLink, onTaskI
       <div style={{ display: 'flex', flexDirection: 'column' }}>
         {merged.map(({ item, task }) =>
           task ? (
-            <AssetRow key={task.id} task={task} item={item} t={t} onToggle={onToggle} onSaveLink={onSaveLink} />
+            <AssetRow key={task.id} task={task} item={item} releaseId={releaseId} trackId={trackId} t={t} onToggle={onToggle} onSaveLink={onSaveLink} />
           ) : (
             <VirtualAssetRow key={item.title} item={item} releaseId={releaseId} trackId={trackId} onInserted={onTaskInserted} />
           )
@@ -526,20 +531,105 @@ function AssetsTab({ tasks, releaseId, trackId, t, onToggle, onSaveLink, onTaskI
   )
 }
 
-function AssetRow({ task, item, t, onToggle, onSaveLink }: {
+// ── asset config ─────────────────────────────────────────────────────────────
+
+type AssetType = 'image' | 'document' | 'audio' | 'code' | 'url'
+
+function getAssetConfig(title: string): { type: AssetType; accept: string } {
+  if (title.includes('עטיפת'))                                  return { type: 'image',    accept: 'image/*' }
+  if (title.includes('מילות שיר') || title.includes('מסמך'))   return { type: 'document', accept: '.pdf,.doc,.docx' }
+  if (title.includes('WAV') || title.includes('MP3'))           return { type: 'audio',    accept: '.wav,.mp3,.aif,.aiff' }
+  if (title.includes('ISRC') || title.includes('UPC'))          return { type: 'code',     accept: '' }
+  if (title.includes('לינק') || title.includes('יוטיוב'))      return { type: 'url',      accept: '' }
+  return { type: 'document', accept: '*' }
+}
+
+// ── asset row ─────────────────────────────────────────────────────────────────
+
+function AssetRow({ task, item, releaseId, trackId, t, onToggle, onSaveLink }: {
   task: Task
   item: { title: string; desc: string }
+  releaseId: string
+  trackId: string | null
   t: typeof strings['he']
   onToggle: (task: Task) => Promise<void>
   onSaveLink: (task: Task, url: string) => Promise<void>
 }) {
-  const [showLink, setShowLink]     = useState(false)
-  const [linkVal, setLinkVal]       = useState(task.link_url ?? '')
-  const [savingLink, setSavingLink] = useState(false)
-  const [toggling, setToggling]     = useState(false)
+  const [toggling, setToggling]   = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [codeVal, setCodeVal]     = useState(task.link_url ?? '')
+  const [savingCode, setSavingCode] = useState(false)
+  const fileInputRef              = useRef<HTMLInputElement>(null)
+  const config = getAssetConfig(task.title)
 
   async function handleToggle() { setToggling(true); await onToggle(task); setToggling(false) }
-  async function handleSaveLink() { setSavingLink(true); await onSaveLink(task, linkVal); setSavingLink(false); setShowLink(false) }
+
+  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploading(true)
+    const db = createClient()
+    const path = `${releaseId}/${trackId ?? 'no-track'}/${task.id}/${file.name}`
+    const { error: uploadError } = await db.storage.from('assets').upload(path, file, { upsert: true })
+    if (uploadError) { console.error('Asset upload error:', uploadError); setUploading(false); return }
+    const { data: urlData } = db.storage.from('assets').getPublicUrl(path)
+    await onSaveLink(task, urlData.publicUrl)
+    setUploading(false)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  async function handleCodeSave() {
+    if (!codeVal.trim()) return
+    setSavingCode(true)
+    await onSaveLink(task, codeVal.trim())
+    setSavingCode(false)
+  }
+
+  async function handleRemove() {
+    await onSaveLink(task, '')
+    setCodeVal('')
+  }
+
+  function FilePreview() {
+    const url = task.link_url!
+    const filename = decodeURIComponent(url.split('/').pop()?.split('?')[0] ?? url)
+    if (config.type === 'image') {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={url} alt="" style={{ width: 60, height: 60, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <a href={url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#4f46e5', textDecoration: 'underline', wordBreak: 'break-all' }}>{filename}</a>
+          </div>
+          <button onClick={handleRemove} style={{ fontSize: 13, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none', flexShrink: 0 }}>×</button>
+        </div>
+      )
+    }
+    if (config.type === 'audio') {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 13, color: '#4f46e5' }}>🎵</span>
+          <a href={url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#4f46e5', flex: 1, textDecoration: 'underline', wordBreak: 'break-all' }}>{filename}</a>
+          <button onClick={handleRemove} style={{ fontSize: 13, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none' }}>×</button>
+        </div>
+      )
+    }
+    if (config.type === 'code' || config.type === 'url') {
+      return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 12, color: '#4f46e5', flex: 1, wordBreak: 'break-all' }}>{url}</span>
+          <button onClick={handleRemove} style={{ fontSize: 13, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none' }}>×</button>
+        </div>
+      )
+    }
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ fontSize: 13, color: '#4f46e5' }}>📄</span>
+        <a href={url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#4f46e5', flex: 1, textDecoration: 'underline', wordBreak: 'break-all' }}>{filename}</a>
+        <button onClick={handleRemove} style={{ fontSize: 13, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none' }}>×</button>
+      </div>
+    )
+  }
 
   return (
     <div style={{
@@ -548,6 +638,7 @@ function AssetRow({ task, item, t, onToggle, onSaveLink }: {
       border: `1px solid ${task.is_completed ? '#bbf7d0' : '#e5e7eb'}`,
       boxShadow: 'var(--shadow-sm)',
     }}>
+      {/* Main row */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button
           onClick={handleToggle} disabled={toggling}
@@ -555,8 +646,7 @@ function AssetRow({ task, item, t, onToggle, onSaveLink }: {
             width: 20, height: 20, borderRadius: 6, flexShrink: 0, cursor: 'pointer',
             border: `2px solid ${task.is_completed ? '#10b981' : '#d1d5db'}`,
             backgroundColor: task.is_completed ? '#10b981' : '#fff',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            transition: 'all 0.15s',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s',
           }}
         >
           {task.is_completed && <span style={{ color: '#fff', fontSize: 11, fontWeight: 700 }}>✓</span>}
@@ -572,37 +662,43 @@ function AssetRow({ task, item, t, onToggle, onSaveLink }: {
         <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 8px', borderRadius: 6, flexShrink: 0, backgroundColor: task.is_completed ? '#dcfce7' : '#f3f4f6', color: task.is_completed ? '#166534' : '#9ca3af' }}>
           {task.is_completed ? '✓ מוכן' : 'חסר'}
         </span>
-
-        {task.link_url ? (
-          <a href={task.link_url} target="_blank" rel="noreferrer" style={{ fontSize: 13, color: '#4f46e5', flexShrink: 0 }}>🔗</a>
-        ) : (
-          <button onClick={() => setShowLink(!showLink)} style={{ fontSize: 12, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none', flexShrink: 0, transition: 'color 0.15s' }}
-            onMouseEnter={(e) => (e.currentTarget.style.color = '#4f46e5')}
-            onMouseLeave={(e) => (e.currentTarget.style.color = '#9ca3af')}
-          >
-            {t.buttons.addLink}
-          </button>
-        )}
       </div>
 
-      {showLink && (
-        <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-          <input
-            placeholder={t.detail.linkPlaceholder} value={linkVal} onChange={(e) => setLinkVal(e.target.value)}
-            style={{ flex: 1, backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: '#111827', outline: 'none' }}
-          />
-          <button onClick={handleSaveLink} disabled={savingLink}
-            style={{ padding: '6px 14px', borderRadius: 8, backgroundColor: '#4f46e5', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none' }}
-          >
-            {savingLink ? '...' : t.buttons.save}
-          </button>
-        </div>
-      )}
-
-      {task.link_url && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 8 }}>
-          <a href={task.link_url} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: '#4f46e5', textDecoration: 'underline', wordBreak: 'break-all' }}>{task.link_url}</a>
-          <button onClick={() => { setLinkVal(task.link_url ?? ''); setShowLink(true) }} style={{ fontSize: 11, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none' }}>✏️</button>
+      {/* Upload / preview area — shown only when completed */}
+      {task.is_completed && (
+        <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid rgba(0,0,0,0.05)' }}>
+          {task.link_url ? (
+            <FilePreview />
+          ) : (config.type === 'code' || config.type === 'url') ? (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                placeholder={config.type === 'url' ? 'הדביקי URL' : 'הזיני קוד'}
+                value={codeVal}
+                onChange={(e) => setCodeVal(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleCodeSave()}
+                style={{ flex: 1, backgroundColor: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 8, padding: '6px 10px', fontSize: 13, color: '#111827', outline: 'none' }}
+              />
+              <button
+                onClick={handleCodeSave} disabled={savingCode || !codeVal.trim()}
+                style={{ padding: '6px 14px', borderRadius: 8, backgroundColor: '#4f46e5', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none', opacity: !codeVal.trim() ? 0.5 : 1 }}
+              >
+                {savingCode ? '...' : t.buttons.save}
+              </button>
+            </div>
+          ) : (
+            <>
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={uploading}
+                style={{ fontSize: 13, color: '#4f46e5', cursor: uploading ? 'default' : 'pointer', background: 'none', border: '1px dashed #c7d2fe', borderRadius: 8, padding: '6px 14px', transition: 'background-color 0.15s' }}
+                onMouseEnter={(e) => { if (!uploading) e.currentTarget.style.backgroundColor = '#eef2ff' }}
+                onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = 'transparent' }}
+              >
+                {uploading ? '⏳ מעלה...' : 'העלי קובץ 📎'}
+              </button>
+              <input ref={fileInputRef} type="file" accept={config.accept} style={{ display: 'none' }} onChange={handleFileUpload} />
+            </>
+          )}
         </div>
       )}
     </div>
@@ -647,37 +743,95 @@ function VirtualAssetRow({ item, releaseId, trackId, onInserted }: {
 
 // ── task row ──────────────────────────────────────────────────────────────────
 
-function TaskRow({ task, today, onToggle, onDelete, t }: {
+function TaskRow({ task, today, onToggle, onDelete, onUpdateTask, t }: {
   task: Task; today: string
   onToggle: () => void; onDelete: () => void
+  onUpdateTask: (updated: Task) => void
   t: typeof strings['he']
 }) {
-  const [hov, setHov] = useState(false)
-  const overdue = !!(task.due_date && task.due_date < today && !task.is_completed)
+  const [hov, setHov]             = useState(false)
+  const [showNotes, setShowNotes] = useState(false)
+  const [notes, setNotes]         = useState(task.notes ?? '')
+  const [savingNotes, setSavingNotes] = useState(false)
+
+  const overdue  = !!(task.due_date && task.due_date < today && !task.is_completed)
+  const hasNotes = !!(task.notes && task.notes.trim())
+
+  async function handleNotesSave() {
+    if (notes === (task.notes ?? '')) return
+    setSavingNotes(true)
+    const db = createClient()
+    await db.from('tasks').update({ notes }).eq('id', task.id)
+    onUpdateTask({ ...task, notes })
+    setSavingNotes(false)
+  }
 
   return (
     <div
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
-      style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 10, backgroundColor: '#fff', border: '1px solid #e5e7eb', marginBottom: 6, boxShadow: 'var(--shadow-sm)' }}
+      style={{ borderRadius: 10, backgroundColor: '#fff', border: '1px solid #e5e7eb', marginBottom: 6, boxShadow: 'var(--shadow-sm)', overflow: 'hidden' }}
     >
-      <button onClick={onToggle}
-        style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${task.is_completed ? '#10b981' : '#d1d5db'}`, backgroundColor: task.is_completed ? '#10b981' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0, transition: 'all 0.15s' }}
-      >
-        {task.is_completed && <span style={{ color: '#fff', fontSize: 10 }}>✓</span>}
-      </button>
-      <span style={{ flex: 1, fontSize: 14, color: task.is_completed ? '#9ca3af' : '#111827', textDecoration: task.is_completed ? 'line-through' : 'none' }}>
-        {task.title}
-      </span>
-      {task.due_date && (
-        <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, fontWeight: 500, whiteSpace: 'nowrap', backgroundColor: overdue ? '#fee2e2' : '#f3f4f6', color: overdue ? '#ef4444' : '#6b7280' }}>
-          {overdue ? `⚠ ${t.detail.overdue}` : task.due_date}
-        </span>
-      )}
-      {hov && (
-        <button onClick={onDelete} style={{ fontSize: 15, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none', transition: 'color 0.15s' }}
-          onMouseEnter={(e) => (e.currentTarget.style.color = '#ef4444')}
-          onMouseLeave={(e) => (e.currentTarget.style.color = '#9ca3af')}
-        >×</button>
+      {/* Main row */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px' }}>
+        <button onClick={onToggle}
+          style={{ width: 18, height: 18, borderRadius: 4, border: `2px solid ${task.is_completed ? '#10b981' : '#d1d5db'}`, backgroundColor: task.is_completed ? '#10b981' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', flexShrink: 0, transition: 'all 0.15s' }}
+        >
+          {task.is_completed && <span style={{ color: '#fff', fontSize: 10 }}>✓</span>}
+        </button>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ fontSize: 14, color: task.is_completed ? '#9ca3af' : '#111827', textDecoration: task.is_completed ? 'line-through' : 'none' }}>
+            {task.title}
+          </span>
+          {hasNotes && !showNotes && (
+            <p style={{ margin: '2px 0 0', fontSize: 12, color: '#6b7280', lineHeight: 1.4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {(task.notes ?? '').slice(0, 60)}{(task.notes ?? '').length > 60 ? '...' : ''}
+            </p>
+          )}
+        </div>
+
+        {task.due_date && (
+          <span style={{ fontSize: 11, padding: '2px 8px', borderRadius: 6, fontWeight: 500, whiteSpace: 'nowrap', backgroundColor: overdue ? '#fee2e2' : '#f3f4f6', color: overdue ? '#ef4444' : '#6b7280' }}>
+            {overdue ? `⚠ ${t.detail.overdue}` : task.due_date}
+          </span>
+        )}
+
+        {hov && (
+          <>
+            <button
+              onClick={() => setShowNotes(!showNotes)}
+              title="הוסיפי הערה"
+              style={{ fontSize: 14, cursor: 'pointer', background: 'none', border: 'none', color: hasNotes ? '#4f46e5' : '#9ca3af', transition: 'color 0.15s', flexShrink: 0 }}
+            >
+              📝
+            </button>
+            <button
+              onClick={onDelete}
+              style={{ fontSize: 15, color: '#9ca3af', cursor: 'pointer', background: 'none', border: 'none', transition: 'color 0.15s', flexShrink: 0 }}
+              onMouseEnter={(e) => (e.currentTarget.style.color = '#ef4444')}
+              onMouseLeave={(e) => (e.currentTarget.style.color = '#9ca3af')}
+            >×</button>
+          </>
+        )}
+      </div>
+
+      {/* Notes textarea */}
+      {showNotes && (
+        <div style={{ padding: '0 14px 12px' }}>
+          <textarea
+            placeholder="הוסיפי הערה..."
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            onBlur={handleNotesSave}
+            rows={2}
+            style={{
+              width: '100%', backgroundColor: '#f9fafb', border: '1px solid #e5e7eb',
+              borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#111827',
+              outline: 'none', resize: 'vertical', fontFamily: 'inherit', display: 'block',
+            }}
+          />
+          {savingNotes && <span style={{ fontSize: 11, color: '#9ca3af', marginTop: 4, display: 'block' }}>שומר...</span>}
+        </div>
       )}
     </div>
   )
@@ -731,6 +885,10 @@ function TasksTab({ releaseId, tasks, t, onUpdate }: {
     const db = createClient()
     await db.from('tasks').delete().eq('id', task.id)
     onUpdate(tasks.filter((tk) => tk.id !== task.id))
+  }
+
+  function updateTask(updated: Task) {
+    onUpdate(tasks.map((tk) => tk.id === updated.id ? updated : tk))
   }
 
   return (
@@ -791,7 +949,7 @@ function TasksTab({ releaseId, tasks, t, onUpdate }: {
         )}
         {active.map((task) => (
           <TaskRow key={task.id} task={task} today={today} t={t}
-            onToggle={() => toggleTask(task)} onDelete={() => deleteTask(task)} />
+            onToggle={() => toggleTask(task)} onDelete={() => deleteTask(task)} onUpdateTask={updateTask} />
         ))}
       </div>
 
@@ -805,7 +963,7 @@ function TasksTab({ releaseId, tasks, t, onUpdate }: {
           </button>
           {showCompleted && completed.map((task) => (
             <TaskRow key={task.id} task={task} today={today} t={t}
-              onToggle={() => toggleTask(task)} onDelete={() => deleteTask(task)} />
+              onToggle={() => toggleTask(task)} onDelete={() => deleteTask(task)} onUpdateTask={updateTask} />
           ))}
         </div>
       )}

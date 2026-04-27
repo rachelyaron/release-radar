@@ -42,6 +42,7 @@ export interface Task {
   is_completed: boolean
   category: TaskCategory
   link_url: string | null
+  notes?: string | null
 }
 
 export interface Submission {
